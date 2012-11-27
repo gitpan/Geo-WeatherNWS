@@ -11,6 +11,21 @@ package Geo::WeatherNWS;
 #                 14 November 2012 - removed unneeded /d after tr,
 #                                    make network tests optional,
 #                                    check status of opens - Bob
+#                 27 November 2012 - Address bug 14632 (METAR Decoding) from dstroma
+#                 		     Address bug 27513 (Geo-WeatherNWS returns wrong station code)
+#                 		     from Guenter Knauf
+#                                    Fix issues with undefined values,
+#                                    Change some conversion constants,
+#                                    Round instead of truncate results,
+#                                    Only calculate windchill for proper range,
+#                                    "ptemerature" is now spelled "ptemperature"
+#				     Fixed handling of condition text
+#                                    Relax ICAO naming rules
+#				     Change ICAO website
+#				     Change http web site from weather.noaa.gov
+#                                    to www.aviationweather.gov, and change parsing to match.
+#                                    Add report_date and report_time items.
+#                                    - Bob
 #
 #
 #------------------------------------------------------------------------------
@@ -31,7 +46,275 @@ use Carp;
 # Version
 #------------------------------------------------------------------------------
 
-our $VERSION = '1.0401';
+our $VERSION = '1.05';
+
+#------------------------------------------------------------------------------
+# Round function
+# Using Math::Round would add another dependency
+#------------------------------------------------------------------------------
+
+sub round {
+    my $float = shift;
+    my $rounded;
+
+    if ( defined $float ) {
+        $rounded = sprintf "%.0f", $float;
+    }
+    return $rounded;
+}
+
+#------------------------------------------------------------------------------
+# Temperature conversion
+# If the temperature we are converting from is undefined,
+# then the temperature we are converting to is also undefined.
+#------------------------------------------------------------------------------
+
+sub convert_f_to_c {
+    my $fahrenheit = shift;
+    my $celsius;
+
+    if (defined $fahrenheit) {
+        $celsius = (5.0/9.0) * ($fahrenheit - 32.0);
+    }    
+    return $celsius;
+}
+
+sub convert_c_to_f {
+    my $celsius = shift;
+    my $fahrenheit;
+
+    if (defined $celsius)  {
+        $fahrenheit = ((9.0/5.0) * $celsius) + 32.0;
+    }
+    return $fahrenheit;
+}
+
+#------------------------------------------------------------------------------
+# Windchill
+#------------------------------------------------------------------------------
+
+sub windchill {
+    my $F = shift;
+    my $wind_speed_mph = shift;
+    my $windchill;
+
+    # This is the North American wind chill index.
+    # Windchill temperature is only defined for:
+    # *  temperatures at or below 50 F
+    # *  wind speed above 3 mph
+    # Bright sunshine may increase the wind chill temperature by
+    # 10 to 18 degress F.
+
+    if (defined $F && defined $wind_speed_mph) {
+        # Old Formula
+        # my $Windc=int(
+	#    0.0817*
+	#    (3.71*$Self->{windspeedmph}**0.5 + 5.81 - 0.25*$Self->{windspeedmph})*
+	#    ($F - 91.4) + 91.4);
+
+        # New Formula
+	if ($F <= 50 && $wind_speed_mph > 3) {
+            $windchill =
+                35.74 +
+                ( 0.6215 * $F ) -
+                ( 35.75 * ( $wind_speed_mph**0.16 ) ) +
+                ( ( 0.4275 * $F ) * ( $wind_speed_mph**0.16 ) );
+	}
+    }
+    return $windchill;
+}
+
+#------------------------------------------------------------------------------
+# Heat Index
+#------------------------------------------------------------------------------
+
+sub heat_index {
+    my $F = shift;
+    my $rh = shift;
+    my $heat_index;
+
+    if (defined $F && defined $rh) {
+        $heat_index =
+            -42.379 +
+            2.04901523 * $F +
+            10.14333127 * $rh -
+            0.22475541 * $F * $rh -
+            6.83783e-03 * $F**2 -
+            5.481717e-02 * $rh**2 +
+            1.22874e-03 * $F**2 * $rh +
+            8.5282e-04 * $F * $rh**2 -
+            1.99e-06 * $F**2 * $rh**2;
+    }
+    return $heat_index;
+}
+
+#------------------------------------------------------------------------------
+# Convert wind speed from nautical miles per hour to miles per hour
+#------------------------------------------------------------------------------
+
+sub convert_kts_to_mph {
+    my $knots = shift;
+    my $mph;
+
+    if (defined $knots) {
+        $mph = $knots * 1.150779;
+    }
+    return $mph;
+}
+
+#------------------------------------------------------------------------------
+# Convert wind speed from nautical miles per hour to kilometers per hour
+#------------------------------------------------------------------------------
+
+sub convert_kts_to_kmh {
+    my $knots = shift;
+    my $kmh;
+
+    if (defined $knots) {
+        $kmh = $knots * 1.852;
+    }
+    return $kmh;
+}
+
+#------------------------------------------------------------------------------
+# Convert miles to kilometers
+#------------------------------------------------------------------------------
+
+sub convert_miles_to_km {
+    my $miles = shift;
+    my $km;
+
+    if (defined $miles) {
+        $km = $miles * 1.609344;
+    }
+    return $km;
+}
+
+#------------------------------------------------------------------------------
+# Translate Weather into readable Conditions Text
+#
+# Reference is WMO Code Table 4678
+#------------------------------------------------------------------------------
+
+sub translate_weather {
+    my $coded = shift;
+    my $old_conditionstext = shift;
+    my $old_conditions1 = shift;
+    my $old_conditions2 = shift;
+    my ($conditionstext, $conditions1, $conditions2, $intensity);
+
+    # We use %Converter to translate 2-letter codes into text
+
+    my %Converter = (
+        BR => 'Mist',
+        TS => 'Thunderstorm',
+        MI => 'Shallow',
+        PR => 'Partial',
+        BC => 'Patches',
+        DR => 'Low Drifting',
+        BL => 'Blowing',
+        SH => 'Shower',
+        FZ => 'Freezing',
+        DZ => 'Drizzle',
+        RA => 'Rain',
+        SN => 'Snow',
+        SG => 'Snow Grains',
+        IC => 'Ice Crystals',
+        PE => 'Ice Pellets',
+        PL => 'Ice Pellets',
+        GR => 'Hail',
+        GS => 'Small Hail/Snow',
+        UP => 'Unknown Precipitation',
+        FG => 'Fog',
+        FU => 'Smoke',
+        VA => 'Volcanic Ash',
+        DU => 'Widespread Dust',
+        SA => 'Sand',
+        HZ => 'Haze',
+        PY => 'Spray',
+        PO => 'Dust Devils',
+        SQ => 'Squalls',
+        FC => 'Tornado',
+        SS => 'Sandstorm'
+    );
+
+    if ( $coded =~ /^[-+]/ ) {
+	# Heavy(+) or Light(-) condition
+
+        if ( !$old_conditions1 ) {
+            my ( $Block1, $Block2 );
+            my $Modifier = substr( $coded, 0, 1 ); # +/-
+            my $Block1t  = substr( $coded, 1, 2 ); # e.g. TS
+            my $Block2t  = substr( $coded, 3, 4 ); # e.g. RA
+
+            $Block1 = $Converter{$Block1t};        # e.g. Thunderstorm
+            $conditions1 = $Block1;                # e.g. Thunderstorm
+
+            if ($Block2t) {
+                $Block2 = $Converter{$Block2t};    # e.g. Rain
+                $conditions2 = $Block2;            # e.g. Rain
+            }
+
+            if ( $Modifier =~ /^\-/ ) {
+                $Block1 = "Light $Block1";         # e.g. Light Thunderstorm
+                $intensity = "Light";
+            }
+            elsif ( $Modifier =~ /^\+/ ) {
+                $Block1 = "Heavy $Block1";         # e.g. Heavy Thunderstorm
+                $intensity = "Heavy";
+            }
+
+            if ($Block2) {
+                $Block1 = "$Block1 $Block2";       # e.g. Light Thunderstorm Rain
+            }
+
+            if ($old_conditionstext) {
+                if ( $Block1 eq "SH" ) {
+                    $conditionstext = "$Block2 of $Block1";
+                    $conditions1    = "Showers of";
+                }
+                else {
+                    $conditionstext = "$old_conditionstext and $Block1";
+                }
+            }
+            else {
+                $conditionstext = $Block1;
+            }
+        }
+    }
+    else {
+	# Moderate condition
+
+        if ( !$old_conditions1 ) {
+            my ( $Block1, $Block2 );
+            my $Block1t = substr( $coded, 0, 2 ); # e.g. TS
+            my $Block2t = substr( $coded, 2, 4 ); # e.g. RA
+
+            $Block1 = $Converter{$Block1t};       # e.g. Thunderstorm
+            $conditions1 = $Block1;               # e.g. Thunderstorm
+
+            if ($Block2t) {
+                $Block2      = $Converter{$Block2t};
+                $conditions2 = $Block2;
+		$Block1      = "$Block1 $Block2";
+            }
+
+            if ($old_conditionstext) {
+                if ( $Block1 eq "SH" ) {
+                    $conditionstext = "$Block2 of $Block1";
+                    $conditions1    = "Showers of";
+                 }
+                 else {
+                    $conditionstext = "$old_conditionstext and $Block1";
+                 }
+            }
+            else {
+                $conditionstext = $Block1;
+            }
+        }
+    }
+    return ($conditionstext, $conditions1, $conditions2, $intensity);
+}
 
 #------------------------------------------------------------------------------
 # Lets create a new self
@@ -105,7 +388,9 @@ sub settimeout {
 sub getreporthttp {
     my $Self = shift;
     my $Code = shift;
-    $Self->{http} = "http://weather.noaa.gov/cgi-bin/mgetmetar.pl?cccc=$Code";
+    # The old site was: http://weather.noaa.gov/cgi-bin/mgetmetar.pl?cccc=$Code
+    $Self->{http} = 
+        'http://www.aviationweather.gov/adds/metars/?station_ids=' . $Code . '&chk_metars=on&hoursStr=most+recent+only';
     my $Ret = &getreport( $Self, $Code );
     return $Ret;
 }
@@ -136,9 +421,19 @@ sub getreport {
         if ( $Res->is_success ) {
             my @Lines = split( /\n/, $Res->content );
             foreach my $Line (@Lines) {
-                if ( $Line =~ /^([A-Z][A-Z][A-Z][A-Z])/ ) {
-                    $Self->{obs} = $Line;
-                    last;
+		if ( $Line =~ /<(TITLE|H1|H2)>/ ) {
+			# ignore
+		}
+		else {
+		    # Remove HTML elements.
+		    # (This isn't very robust, but it gets the job done for now.)
+		    $Line =~ s/<[^>]*>//g;
+
+		    # If the line starts with an ICAO, then the line is an observation (we hope)
+                    if ( $Line =~ /^[A-Z][A-Z0-9]{3}\s/ ) {
+                        $Self->{obs} = $Line;
+                        last;
+                    }
                 }
             }
         }
@@ -225,53 +520,53 @@ sub decode {
     my $Self = shift;
     my @Cloudlevels;
 
- #------------------------------------------------------------------------------
- # We use %Converter to translate 2-letter codes into text
- #------------------------------------------------------------------------------
-
-    my %Converter = (
-        BR => 'Mist',
-        TS => 'Thunderstorm',
-        MI => 'Shallow',
-        PR => 'Partial',
-        BC => 'Patches',
-        DR => 'Low Drifting',
-        BL => 'Blowing',
-        SH => 'Shower',
-        FZ => 'Freezing',
-        DZ => 'Drizzle',
-        RA => 'Rain',
-        SN => 'Snow',
-        SG => 'Snow Grains',
-        IC => 'Ice Crystals',
-        PE => 'Ice Pellets',
-        PL => 'Ice Pellets',
-        GR => 'Hail',
-        GS => 'Small Hail/Snow',
-        UP => 'Unknown Precipitation',
-        FG => 'Fog',
-        FU => 'Smoke',
-        VA => 'Volcanic Ash',
-        DU => 'Widespread Dust',
-        SA => 'Sand',
-        HZ => 'Haze',
-        PY => 'Spray',
-        PO => 'Dust Devils',
-        SQ => 'Squalls',
-        FC => 'Tornado',
-        SS => 'Sandstorm'
-    );
-
     my @Splitter = split( /\s+/, $Self->{obs} );
 
  #------------------------------------------------------------------------------
  # Break the METAR observations down and decode
  #------------------------------------------------------------------------------
 
-    foreach my $Line (@Splitter) {
+    my $have_icao_code = 0;
+    my $column = 0;
 
-        if ( ( $Line =~ /^([A-Z][A-Z][A-Z][A-Z])/ ) && ( $Line ne "AUTO" ) ) {
+    foreach my $Line (@Splitter) {
+        $column++;
+
+
+ #------------------------------------------------------------------------------
+ # Report date and time
+ # These aren't always present (for example, from the http interface)
+ #------------------------------------------------------------------------------
+
+        if ( $column == 1 && $Line =~ /^\d{4}\/\d{2}\/\d{2}$/) {
+            $Self->{report_date} = $Line;
+	}
+
+        if ( $column == 2 && $Line =~ /^\d{2}:\d{2}$/) {
+            $Self->{report_time} = $Line;
+	}
+
+ #------------------------------------------------------------------------------
+ # ICAO station code
+ #------------------------------------------------------------------------------
+
+        if ( ( $Line =~ /^([A-Z][A-Z0-9]{3})/ ) &&
+	     ( !$have_icao_code ) ) {
+	    # Use the first value that looks like the ICAO code.
+	    # This should either be the first item, or
+	    # the third item if there is a leading date and time.
+	    # (Before we checked have_icao_code, we'd get values
+	    # like TSRA or FZFG later in the observation being treated
+	    # as the ICAO code.)
+	    # We also allow the last three characters to be digits.
+
+	    # There was a check for "AUTO" above before, for now
+	    # we'll add an extra check for that value. (AUTO should
+	    # show up in the fifth column.)
+            croak "Unexpected value AUTO for ICAO code" if $Line eq "AUTO";
+
             $Self->{code} = $Line;
+	    $have_icao_code = 1;
         }
 
  #------------------------------------------------------------------------------
@@ -350,14 +645,18 @@ sub decode {
                 $Winddirtxt = "Calm";
             }
 
-            my $MPH  = int( $Windspeedkts / 0.868391 );
-            my $GMPH = int( $Windgustkts / 0.868391 );
+            my $MPH  = round( convert_kts_to_mph($Windspeedkts) );
+            my $GMPH = round( convert_kts_to_mph($Windgustkts) );
+            my $KMH  = round( convert_kts_to_kmh($Windspeedkts) );
+            my $GKMH = round( convert_kts_to_kmh($Windgustkts) );
 
             $Self->{windspeedkts} = $Windspeedkts;
             $Self->{windgustkts}  = $Windgustkts;
             $Self->{windspeedkts} = $Self->{windspeedkts} - 0;
             $Self->{windspeedmph} = $MPH;
+            $Self->{windspeedkmh} = $KMH;
             $Self->{windgustmph}  = $GMPH;
+            $Self->{windgustkmh}  = $GKMH;
             $Self->{winddirtext}  = $Winddirtxt;
             $Self->{winddir}      = $Winddir;
             $Self->{winddir}      = $Self->{winddir} - 0;
@@ -379,121 +678,29 @@ sub decode {
                 $Line = $Splitter[0] / $Splitter[1];
             }
 
-            my $Viskm = int( $Line * 1.6 );
-            $Self->{visibility_mi} = $Line;
-            $Self->{visibility_km} = $Viskm;
+            my $Viskm = convert_miles_to_km( $Line );
+            $Self->{visibility_mi} = round($Line);
+            $Self->{visibility_km} = round($Viskm);
         }
 
  #------------------------------------------------------------------------------
  # Current Conditions
  #------------------------------------------------------------------------------
 
-        elsif (( $Line =~ /BR([A-Z])*/ )
-            || ( $Line =~ /[\+\-]VC([A-Z])*/ )
+        elsif (
+            ( $Line =~ /
+                (BR|TS|MI|PR|BC|DR|BL|SH|FZ|DZ|RA|SN|SG|IC|PE|PL|GR|GS|UP|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS)
+	        ([A-Z])*
+	        /x)
             || ( $Line =~ /^VC([A-Z])*/ )
-            || ( $Line =~ /TS([A-Z])*/ )
-            || ( $Line =~ /MI([A-Z])*/ )
-            || ( $Line =~ /PR([A-Z])*/ )
-            || ( $Line =~ /BC([A-Z])*/ )
-            || ( $Line =~ /DR([A-Z])*/ )
-            || ( $Line =~ /BL([A-Z])*/ )
-            || ( $Line =~ /SH([A-Z])*/ )
-            || ( $Line =~ /FZ([A-Z])*/ )
-            || ( $Line =~ /DZ([A-Z])*/ )
-            || ( $Line =~ /RA([A-Z])*/ )
-            || ( $Line =~ /SN([A-Z])*/ )
-            || ( $Line =~ /SG([A-Z])*/ )
-            || ( $Line =~ /IC([A-Z])*/ )
-            || ( $Line =~ /PE([A-Z])*/ )
-            || ( $Line =~ /PL([A-Z])*/ )
-            || ( $Line =~ /GR([A-Z])*/ )
-            || ( $Line =~ /GS([A-Z])*/ )
-            || ( $Line =~ /UP([A-Z])*/ )
-            || ( $Line =~ /FG([A-Z])*/ )
-            || ( $Line =~ /FU([A-Z])*/ )
-            || ( $Line =~ /VA([A-Z])*/ )
-            || ( $Line =~ /DU([A-Z])*/ )
-            || ( $Line =~ /SA([A-Z])*/ )
-            || ( $Line =~ /HZ([A-Z])*/ )
-            || ( $Line =~ /PY([A-Z])*/ )
-            || ( $Line =~ /PO([A-Z])*/ )
-            || ( $Line =~ /SQ([A-Z])*/ )
-            || ( $Line =~ /FC([A-Z])*/ )
-            || ( $Line =~ /SS([A-Z])*/ ) )
+            || ( $Line =~ /[\+\-]VC([A-Z])*/ ) )
         {
-            my $Old = $Self->{conditionstext};
-
-            if ( ( $Line =~ /^\-/ ) || ( $Line =~ /^\+/ ) ) {
-                if ( !$Self->{conditions1} ) {
-                    my ( $Block1, $Block2 );
-                    my $Modifier = substr( $Line, 0, 1 );
-                    my $Block1t  = substr( $Line, 1, 2 );
-                    my $Block2t  = substr( $Line, 3, 4 );
-
-                    $Block1 = $Converter{$Block1t};
-                    $Self->{conditions1} = $Block1;
-
-                    if ($Block2t) {
-                        $Block2 = $Converter{$Block2t};
-                        $Self->{conditions2} = $Block2;
-                    }
-
-                    if ( $Modifier =~ /^\-/ ) {
-                        $Block1 = "Light $Block1";
-                        $Self->{intensity} = "Light";
-                    }
-                    elsif ( $Modifier =~ /^\+/ ) {
-                        $Block1 = "Heavy $Block1";
-                        $Self->{intensity} = "Heavy";
-                    }
-
-                    if ($Block2) {
-                        $Block1 = "$Block1 $Block2";
-                    }
-
-                    if ($Old) {
-                        if ( $Block1 eq "SH" ) {
-                            $Self->{conditionstext} = "$Block2 of $Block1";
-                            $Self->{conditions1}    = "Showers of";
-                        }
-                        else {
-                            $Self->{conditionstext} = "$Old and $Block1";
-                        }
-                    }
-                    else {
-                        $Self->{conditionstext} = $Block1;
-                    }
-                }
-            }
-            else {
-                if ( !$Self->{conditions1} ) {
-                    my ( $Block1, $Block2 );
-                    my $Block1t = substr( $Line, 0, 2 );
-                    my $Block2t = substr( $Line, 2, 4 );
-
-                    $Block1 = $Converter{$Block1t};
-                    $Self->{conditions1} = $Block1;
-
-                    if ($Block2) {
-                        $Block2              = $Converter{$Block2t};
-                        $Self->{conditions2} = $Block2;
-                        $Block1              = "$Block1 $Block2";
-                    }
-
-                    if ($Old) {
-                        if ( $Block1 eq "SH" ) {
-                            $Self->{conditionstext} = "$Block2 of $Block1";
-                            $Self->{conditions1}    = "Showers of";
-                        }
-                        else {
-                            $Self->{conditionstext} = "$Old and $Block1";
-                        }
-                    }
-                    else {
-                        $Self->{conditionstext} = $Block1;
-                    }
-                }
-            }
+            my ($conditionstext, $conditions1, $conditions2, $intensity) = 
+	        translate_weather($Line, $Self->{conditionstext}, $Self->{conditions1},$Self->{conditions2});
+            $Self->{conditionstext} = $conditionstext if defined $conditionstext;
+	    $Self->{conditions1} = $conditions1 if defined $conditions1;
+	    $Self->{conditions2} = $conditions2 if defined $conditions2;
+	    $Self->{intensity} = $intensity if defined $intensity;
         }
 
  #------------------------------------------------------------------------------
@@ -530,7 +737,6 @@ sub decode {
             if ( !$Self->{conditionstext} ) {
                 $Self->{conditionstext} = $Self->{cloudcover};
             }
-
         }
 
  #------------------------------------------------------------------------------
@@ -556,39 +762,28 @@ sub decode {
                 $Dewpoint = ( $Dewpoint - ( $Dewpoint * 2 ) );
             }
 
-            my $Tempf = int( ( 1.8 * $Temperature ) + 32 );
-            my $Dewf  = int( ( 1.8 * $Dewpoint ) + 32 );
+            my $Tempf = convert_c_to_f( $Temperature );
+            my $Dewf  = convert_c_to_f( $Dewpoint );
 
             my $Es =
               6.11 * 10.0**( 7.5 * $Temperature / ( 237.7 + $Temperature ) );
             my $E = 6.11 * 10.0**( 7.5 * $Dewpoint / ( 237.7 + $Dewpoint ) );
-            my $rh = int( ( $E / $Es ) * 100 );
+            my $rh = round( ( $E / $Es ) * 100 );
 
             my $F = $Tempf;
 
-            my $Heati =
-              int( -42.379 +
-                  2.04901523 * $F +
-                  10.14333127 * $rh -
-                  0.22475541 * $F * $rh -
-                  6.83783e-03 * $F**2 -
-                  5.481717e-02 * $rh**2 +
-                  1.22874e-03 * $F**2 * $rh +
-                  8.5282e-04 * $F * $rh**2 -
-                  1.99e-06 * $F**2 * $rh**2 );
-            my $Heatic = int( 5 / 9 * ( $Heati - 32 ) );
+	    my $Heati = heat_index( $F, $rh );
+            my $Heatic = convert_f_to_c( $Heati );
 
-# Old Formula
-# my $Windc=int(0.0817*(3.71*$Self->{windspeedmph}**0.5 + 5.81 - 0.25*$Self->{windspeedmph})*($F - 91.4) + 91.4);
+            $Tempf = round($Tempf);
+            $Dewf = round($Dewf);
+            $Heati = round($Heati);
+            $Heatic = round($Heatic);
 
-            # New Formula
-
-            my $Windc =
-              int( 35.74 +
-                  ( 0.6215 * $F ) -
-                  ( 35.75 * ( $Self->{windspeedmph}**0.16 ) ) +
-                  ( ( 0.4275 * $F ) * ( $Self->{windspeedmph}**0.16 ) ) );
-            my $Windcc = int( 5 / 9 * ( $Windc - 32 ) );
+	    my $Windc = windchill( $F, $Self->{windspeedmph} );
+            my $Windcc = convert_f_to_c( $Windc );
+	    $Windc = round($Windc);
+	    $Windcc = round($Windcc);
 
             $Self->{temperature_c}     = $Temperature;
             $Self->{temperature_f}     = $Tempf;
@@ -599,7 +794,6 @@ sub decode {
             $Self->{heat_index_f}      = $Heati;
             $Self->{windchill_c}       = $Windcc;
             $Self->{windchill_f}       = $Windc;
-
         }
 
  #------------------------------------------------------------------------------
@@ -607,22 +801,23 @@ sub decode {
  # Based on report (inches of mercury)
  #------------------------------------------------------------------------------
 
-        elsif ( $Line =~ /^(A[0-9][0-9][0-9][0-9])/ ) {
+        elsif ( $Line =~ /^(A[0-9]{4})/ ) {
             $Line =~ tr/[A-Z]//d;
             my $Part1 = substr( $Line, 0, 2 );
             my $Part2 = substr( $Line, 2, 4 );
             $Self->{pressure_inhg} = "$Part1.$Part2";
 
-            my $mb   = int( $Self->{pressure_inhg} * 33.8639 );
-            my $mmHg = int( $Self->{pressure_inhg} * 25.4 );
+            my $mb   = $Self->{pressure_inhg} * 33.8639;
+            my $mmHg = $Self->{pressure_inhg} * 25.4;
             my $lbin = ( $Self->{pressure_inhg} * 0.491154 );
             my $kgcm = ( $Self->{pressure_inhg} * 0.0345316 );
+            $mb = round($mb);
+            $mmHg = round($mmHg);
 
             $Self->{pressure_mb}   = $mb;
             $Self->{pressure_mmhg} = $mmHg;
             $Self->{pressure_lbin} = $lbin;
             $Self->{pressure_kgcm} = $kgcm;
-
         }
 
  #------------------------------------------------------------------------------
@@ -630,20 +825,20 @@ sub decode {
  # Based on report (millibars)
  #------------------------------------------------------------------------------
 
-        elsif ( $Line =~ /^(Q[0-9][0-9][0-9][0-9])/ ) {
+        elsif ( $Line =~ /^(Q[0-9]{4})/ ) {
             $Line =~ tr/[A-Z]//d;
             $Self->{pressure_mb} = $Line;
 
             my $inhg = ( $Self->{pressure_mb} * 0.02953 );
             $Self->{pressure_inhg} = sprintf( "%.2f", $inhg );
-            my $mmHg = int( $Self->{pressure_inhg} * 25.4 );
+            my $mmHg = $Self->{pressure_inhg} * 25.4;
             my $lbin = ( $Self->{pressure_inhg} * 0.491154 );
             my $kgcm = ( $Self->{pressure_inhg} * 0.0345316 );
+            $mmHg = round($mmHg);
 
             $Self->{pressure_mmhg} = $mmHg;
             $Self->{pressure_lbin} = $lbin;
             $Self->{pressure_kgcm} = $kgcm;
-
         }
 
  #------------------------------------------------------------------------------
@@ -695,6 +890,10 @@ sub decode {
             elsif ( $Remark =~ /^SLP/ ) {
                 $Remark =~ tr/[A-Z]//d;
 
+		if ( !defined $Remark || $Remark eq "") {
+			$Remark = 0;
+		}
+
                 if ( ($Remark) && ( $Remark >= 800 ) ) {
                     $Remark = $Remark * .1;
                     $Remark = $Remark + 900;
@@ -706,11 +905,11 @@ sub decode {
 
                 $Self->{slp_inhg} = ( $Remark * 0.0295300 );
                 $Self->{slp_inhg} = substr( $Self->{slp_inhg}, 0, 5 );
-                $Self->{slp_mmhg} = int( $Remark * 0.750062 );
+                $Self->{slp_mmhg} = round( $Remark * 0.750062 );
                 $Self->{slp_lbin} = ( $Remark * 0.0145038 );
                 $Self->{slp_kgcm} = ( $Remark * 0.00101972 );
-                $Self->{slp_mb}   = int($Remark);
-            }
+                $Self->{slp_mb}   = round($Remark);
+	    }
 
  #------------------------------------------------------------------------------
  # Thunderstorm info
@@ -748,35 +947,7 @@ sub decode {
  # Event beginning or ending
  #------------------------------------------------------------------------------
 
-            elsif (( $Line =~ /^BRB/ )
-                || ( $Line =~ /^TSB/ )
-                || ( $Line =~ /^MIB/ )
-                || ( $Line =~ /^PRB/ )
-                || ( $Line =~ /^BCB/ )
-                || ( $Line =~ /^DRB/ )
-                || ( $Line =~ /^BLB/ )
-                || ( $Line =~ /^SHB/ )
-                || ( $Line =~ /^FZB/ )
-                || ( $Line =~ /^DZB/ )
-                || ( $Line =~ /^RAB/ )
-                || ( $Line =~ /^SNB/ )
-                || ( $Line =~ /^SGB/ )
-                || ( $Line =~ /^ICB/ )
-                || ( $Line =~ /^PEB/ )
-                || ( $Line =~ /^GRB/ )
-                || ( $Line =~ /^GSB/ )
-                || ( $Line =~ /^UPB/ )
-                || ( $Line =~ /^FGB/ )
-                || ( $Line =~ /^FUB/ )
-                || ( $Line =~ /^VAB/ )
-                || ( $Line =~ /^DUB/ )
-                || ( $Line =~ /^SAB/ )
-                || ( $Line =~ /^HZB/ )
-                || ( $Line =~ /^PYB/ )
-                || ( $Line =~ /^POB/ )
-                || ( $Line =~ /^SQB/ )
-                || ( $Line =~ /^FCB/ )
-                || ( $Line =~ /^SSB/ ) )
+            elsif ( $Line =~ /^(BRB|TSB|MIB|PRB|BCB|DRB|BLB|SHB|FZB|DZB|RAB|SNB|SGB|ICB|PEB|GRB|GSB|UPB|FGB|FUB|VAB|DUB|SAB|HZB|PYB|POB|SQB|FCB|SSB)/ )
             {
                 $Self->{eventbe} = $Remark;
             }
@@ -786,7 +957,7 @@ sub decode {
  #------------------------------------------------------------------------------
 
             elsif ( $Remark =~ /^T[0-9]/ ) {
-                $Self->{ptemerature} = $Remark;
+                $Self->{ptemperature} = $Remark;
             }
         }
     }
@@ -844,7 +1015,8 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
 
   $Report->getreporthttp('kcvg');  # same as before, but use the
                                    # http method to the script at
-                                   # weather.noaa.gov
+				   # http://www.aviationweather.gov/adds/metars/
+				   # (used to be weather.noaa.gov)
 
   # Check for errors
 
@@ -902,10 +1074,15 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
   sites via http. When the site you are getting your weather data
   from changes format, then you end up having to re-code your parsing
   program.  With the weather module, all you need is a four-letter
-  station code to get the most recent weather observations.  If you
-  do not know what the station code is for your area, check the site
-  at http://205.156.54.206/oso/siteloc.shtml to start your search.
+  station code to get the most recent weather observations.
 
+  If you do not know what the station code is for your area,
+  these sites might help your search:
+
+    http://en.wikipedia.org/wiki/List_of_airports_by_ICAO_code
+
+    http://www.aircharterguide.com/Airports 
+                 		     
   Since this module uses the NWS METAR Observations, you can get
   weather reports from anywhere in the world that has a four-letter
   station code.
@@ -954,11 +1131,16 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
   to display the information.  Some of the returned info is about
   the report itself, such as:
 
-  $Report->{day}                # Report Date
+  $Report->{day}                # Report day of month
   $Report->{time}               # Report Time
   $Report->{station_type}       # Station Type (auto or manual)
   $Report->{obs}                # The Observation Text (encoded)
   $Report->{code}               # The Station Code
+
+  These values might also be available.
+  (The values {day} and {time} above should always be available.)  
+  $Report->{report_date}        # Report Date
+  $Report->{report_time}        # Report Time
 
   This is the template output:
 
@@ -973,13 +1155,15 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
   These are the returned values specific to wind:
 
   $Report->{windspeedmph}       # Wind Speed (in mph)
-  $Report->{windspeedkts}       # Wind Speed (in kts)
+  $Report->{windspeedkts}       # Wind Speed (in knots)
+  $Report->{windspeedkmh}       # Wind Speed (in km/h)
   $Report->{winddir}            # Wind Direction (in degrees)
   $Report->{winddirtext}        # Wind Direction (text version)
   $Report->{windgustmph}        # Wind Gusts (mph)
-  $Report->{windgustkts}        # Wind Gusts (kts)
+  $Report->{windgustkts}        # Wind Gusts (knots)
+  $Report->{windgustkmh}        # Wind Gusts (km/h)
 
-  These are the retunred values specific to temperature and
+  These are the returned values specific to temperature and
   humidity:
 
   $Report->{temperature_f}      # Temperature (degrees f)
@@ -1018,7 +1202,7 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
   experimental, and these names could change in future releases.
 
   $Report->{remark_arrayref} # Arrayref holding all remarks
-  $Report->{ptemerature}     # Precise Tepmerature Reading
+  $Report->{ptemperature}     # Precise Temperature Reading
   $Report->{storm}           # Thunderstorm stats
   $Report->{slp_inhg}        # Air Pressure at Sea Level (in mercury)
   $Report->{slp_mmhg}        # Air Pressure at Sea Level (mm mercury)
