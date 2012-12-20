@@ -12,21 +12,24 @@ package Geo::WeatherNWS;
 #                                    make network tests optional,
 #                                    check status of opens - Bob
 #                 26 November 2012 - Address bug 14632 (METAR Decoding) from dstroma
-#                 		     Address bug 27513 (Geo-WeatherNWS returns wrong station code)
-#                 		     from Guenter Knauf
+#                                    Address bug 27513 (Geo-WeatherNWS returns wrong station code)
+#                                    from Guenter Knauf
 #                                    Fix issues with undefined values,
 #                                    Change some conversion constants,
 #                                    Round instead of truncate results,
 #                                    Only calculate windchill for proper range,
 #                                    "ptemerature" is now spelled "ptemperature"
-#				     Fixed handling of condition text
+#                                    Fixed handling of condition text
 #                                    Relax ICAO naming rules
-#				     Change ICAO website
-#				     Change http web site from weather.noaa.gov
+#                                    Change ICAO website
+#                                    Change http web site from weather.noaa.gov
 #                                    to www.aviationweather.gov, and change parsing to match.
 #                                    Add report_date and report_time items.
 #                                    - Bob
 #                 27 November 2012 - Add POD documentation for new functions.
+#                 20 December 2012 - Handle undefined dewpoint
+#                                    Minor performance improvement
+#                                    Add test for getreporthttp
 #
 #
 #------------------------------------------------------------------------------
@@ -38,16 +41,15 @@ package Geo::WeatherNWS;
 require 5.005_62;
 use strict;
 use warnings;
-use Net::FTP;
-use IO::Handle;
-use POSIX;
-use Carp;
+use Net::FTP ();
+use POSIX ();
+use Carp ();
 
 #------------------------------------------------------------------------------
 # Version
 #------------------------------------------------------------------------------
 
-our $VERSION = '1.051';
+our $VERSION = '1.052';
 
 #------------------------------------------------------------------------------
 # Round function
@@ -76,7 +78,7 @@ sub convert_f_to_c {
 
     if (defined $fahrenheit) {
         $celsius = (5.0/9.0) * ($fahrenheit - 32.0);
-    }    
+    }
     return $celsius;
 }
 
@@ -109,18 +111,18 @@ sub windchill {
     if (defined $F && defined $wind_speed_mph) {
         # Old Formula
         # my $Windc=int(
-	#    0.0817*
-	#    (3.71*$Self->{windspeedmph}**0.5 + 5.81 - 0.25*$Self->{windspeedmph})*
-	#    ($F - 91.4) + 91.4);
+        #    0.0817*
+        #    (3.71*$Self->{windspeedmph}**0.5 + 5.81 - 0.25*$Self->{windspeedmph})*
+        #    ($F - 91.4) + 91.4);
 
         # New Formula
-	if ($F <= 50 && $wind_speed_mph > 3) {
+        if ($F <= 50 && $wind_speed_mph > 3) {
             $windchill =
                 35.74 +
                 ( 0.6215 * $F ) -
                 ( 35.75 * ( $wind_speed_mph**0.16 ) ) +
                 ( ( 0.4275 * $F ) * ( $wind_speed_mph**0.16 ) );
-	}
+        }
     }
     return $windchill;
 }
@@ -240,7 +242,7 @@ sub translate_weather {
     );
 
     if ( $coded =~ /^[-+]/ ) {
-	# Heavy(+) or Light(-) condition
+        # Heavy(+) or Light(-) condition
 
         if ( !$old_conditions1 ) {
             my ( $Block1, $Block2 );
@@ -284,7 +286,7 @@ sub translate_weather {
         }
     }
     else {
-	# Moderate condition
+        # Moderate condition
 
         if ( !$old_conditions1 ) {
             my ( $Block1, $Block2 );
@@ -297,7 +299,7 @@ sub translate_weather {
             if ($Block2t) {
                 $Block2      = $Converter{$Block2t};
                 $conditions2 = $Block2;
-		$Block1      = "$Block1 $Block2";
+                $Block1      = "$Block1 $Block2";
             }
 
             if ($old_conditionstext) {
@@ -390,7 +392,7 @@ sub getreporthttp {
     my $Self = shift;
     my $Code = shift;
     # The old site was: http://weather.noaa.gov/cgi-bin/mgetmetar.pl?cccc=$Code
-    $Self->{http} = 
+    $Self->{http} =
         'http://www.aviationweather.gov/adds/metars/?station_ids=' . $Code . '&chk_metars=on&hoursStr=most+recent+only';
     my $Ret = &getreport( $Self, $Code );
     return $Ret;
@@ -411,7 +413,7 @@ sub getreport {
     }
 
     if ( $Self->{http} ) {
-        use LWP::UserAgent;
+        require LWP::UserAgent;
         my $Ua = LWP::UserAgent->new();
         $Ua->agent("Geo::WeatherNWS $VERSION");
 
@@ -422,15 +424,15 @@ sub getreport {
         if ( $Res->is_success ) {
             my @Lines = split( /\n/, $Res->content );
             foreach my $Line (@Lines) {
-		if ( $Line =~ /<(TITLE|H1|H2)>/ ) {
-			# ignore
-		}
-		else {
-		    # Remove HTML elements.
-		    # (This isn't very robust, but it gets the job done for now.)
-		    $Line =~ s/<[^>]*>//g;
+                if ( $Line =~ /<(TITLE|H1|H2)>/ ) {
+                    # ignore
+                }
+                else {
+                    # Remove HTML elements.
+                    # (This isn't very robust, but it gets the job done for now.)
+                    $Line =~ s/<[^>]*>//g;
 
-		    # If the line starts with an ICAO, then the line is an observation (we hope)
+                    # If the line starts with an ICAO, then the line is an observation (we hope)
                     if ( $Line =~ /^[A-Z][A-Z0-9]{3}\s/ ) {
                         $Self->{obs} = $Line;
                         last;
@@ -488,7 +490,7 @@ sub getreport {
 
         local $/;    # enable slurp mode
         open my $F, '<', $Tmpfile or
-		croak "error opening temp input $Tmpfile: $!";
+                Carp::croak "error opening temp input $Tmpfile: $!";
         my $Data = <$F>;
         close($F);
         unlink($Tmpfile);
@@ -541,33 +543,33 @@ sub decode {
 
         if ( $column == 1 && $Line =~ /^\d{4}\/\d{2}\/\d{2}$/) {
             $Self->{report_date} = $Line;
-	}
+        }
 
         if ( $column == 2 && $Line =~ /^\d{2}:\d{2}$/) {
             $Self->{report_time} = $Line;
-	}
+        }
 
  #------------------------------------------------------------------------------
  # ICAO station code
  #------------------------------------------------------------------------------
 
         if ( ( $Line =~ /^([A-Z][A-Z0-9]{3})/ ) &&
-	     ( !$have_icao_code ) ) {
-	    # Use the first value that looks like the ICAO code.
-	    # This should either be the first item, or
-	    # the third item if there is a leading date and time.
-	    # (Before we checked have_icao_code, we'd get values
-	    # like TSRA or FZFG later in the observation being treated
-	    # as the ICAO code.)
-	    # We also allow the last three characters to be digits.
+             ( !$have_icao_code ) ) {
+            # Use the first value that looks like the ICAO code.
+            # This should either be the first item, or
+            # the third item if there is a leading date and time.
+            # (Before we checked have_icao_code, we'd get values
+            # like TSRA or FZFG later in the observation being treated
+            # as the ICAO code.)
+            # We also allow the last three characters to be digits.
 
-	    # There was a check for "AUTO" above before, for now
-	    # we'll add an extra check for that value. (AUTO should
-	    # show up in the fifth column.)
-            croak "Unexpected value AUTO for ICAO code" if $Line eq "AUTO";
+            # There was a check for "AUTO" above before, for now
+            # we'll add an extra check for that value. (AUTO should
+            # show up in the fifth column.)
+            Carp::croak "Unexpected value AUTO for ICAO code" if $Line eq "AUTO";
 
             $Self->{code} = $Line;
-	    $have_icao_code = 1;
+            $have_icao_code = 1;
         }
 
  #------------------------------------------------------------------------------
@@ -691,17 +693,17 @@ sub decode {
         elsif (
             ( $Line =~ /
                 (BR|TS|MI|PR|BC|DR|BL|SH|FZ|DZ|RA|SN|SG|IC|PE|PL|GR|GS|UP|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS)
-	        ([A-Z])*
-	        /x)
+                ([A-Z])*
+                /x)
             || ( $Line =~ /^VC([A-Z])*/ )
             || ( $Line =~ /[\+\-]VC([A-Z])*/ ) )
         {
-            my ($conditionstext, $conditions1, $conditions2, $intensity) = 
-	        translate_weather($Line, $Self->{conditionstext}, $Self->{conditions1},$Self->{conditions2});
+            my ($conditionstext, $conditions1, $conditions2, $intensity) =
+                translate_weather($Line, $Self->{conditionstext}, $Self->{conditions1},$Self->{conditions2});
             $Self->{conditionstext} = $conditionstext if defined $conditionstext;
-	    $Self->{conditions1} = $conditions1 if defined $conditions1;
-	    $Self->{conditions2} = $conditions2 if defined $conditions2;
-	    $Self->{intensity} = $intensity if defined $intensity;
+            $Self->{conditions1} = $conditions1 if defined $conditions1;
+            $Self->{conditions2} = $conditions2 if defined $conditions2;
+            $Self->{intensity} = $intensity if defined $intensity;
         }
 
  #------------------------------------------------------------------------------
@@ -758,7 +760,7 @@ sub decode {
                 $Temperature = ( $Temperature - ( $Temperature * 2 ) );
             }
 
-            if ( $Dewpoint =~ /M/ ) {
+            if ( defined $Dewpoint && $Dewpoint =~ /M/ ) {
                 $Dewpoint =~ tr/[A-Z]//d;
                 $Dewpoint = ( $Dewpoint - ( $Dewpoint * 2 ) );
             }
@@ -768,12 +770,16 @@ sub decode {
 
             my $Es =
               6.11 * 10.0**( 7.5 * $Temperature / ( 237.7 + $Temperature ) );
-            my $E = 6.11 * 10.0**( 7.5 * $Dewpoint / ( 237.7 + $Dewpoint ) );
-            my $rh = round( ( $E / $Es ) * 100 );
+            my $E;
+            my $rh;
+            if (defined $Dewpoint) {
+                $E = 6.11 * 10.0**( 7.5 * $Dewpoint / ( 237.7 + $Dewpoint ) );
+                $rh = round( ( $E / $Es ) * 100 );
+            }
 
             my $F = $Tempf;
 
-	    my $Heati = heat_index( $F, $rh );
+            my $Heati = heat_index( $F, $rh );
             my $Heatic = convert_f_to_c( $Heati );
 
             $Tempf = round($Tempf);
@@ -781,10 +787,10 @@ sub decode {
             $Heati = round($Heati);
             $Heatic = round($Heatic);
 
-	    my $Windc = windchill( $F, $Self->{windspeedmph} );
+            my $Windc = windchill( $F, $Self->{windspeedmph} );
             my $Windcc = convert_f_to_c( $Windc );
-	    $Windc = round($Windc);
-	    $Windcc = round($Windcc);
+            $Windc = round($Windc);
+            $Windcc = round($Windcc);
 
             $Self->{temperature_c}     = $Temperature;
             $Self->{temperature_f}     = $Tempf;
@@ -891,9 +897,9 @@ sub decode {
             elsif ( $Remark =~ /^SLP/ ) {
                 $Remark =~ tr/[A-Z]//d;
 
-		if ( !defined $Remark || $Remark eq "") {
-			$Remark = 0;
-		}
+                if ( !defined $Remark || $Remark eq "") {
+                    $Remark = 0;
+                }
 
                 if ( ($Remark) && ( $Remark >= 800 ) ) {
                     $Remark = $Remark * .1;
@@ -910,7 +916,7 @@ sub decode {
                 $Self->{slp_lbin} = ( $Remark * 0.0145038 );
                 $Self->{slp_kgcm} = ( $Remark * 0.00101972 );
                 $Self->{slp_mb}   = round($Remark);
-	    }
+            }
 
  #------------------------------------------------------------------------------
  # Thunderstorm info
@@ -968,7 +974,7 @@ sub decode {
     if ($Templatefile) {
         local $/;    # enable slurp mode
         open my $F, '<', $Templatefile or
-		croak "error opening template file $Templatefile: $!";
+            Carp::croak "error opening template file $Templatefile: $!";
         my $tout = <$F>;
         close($F);
 
@@ -1016,8 +1022,8 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
 
   $Report->getreporthttp('kcvg');  # same as before, but use the
                                    # http method to the script at
-				   # http://www.aviationweather.gov/adds/metars/
-				   # (used to be weather.noaa.gov)
+                                   # http://www.aviationweather.gov/adds/metars/
+                                   # (used to be weather.noaa.gov)
 
   # Check for errors
 
@@ -1082,8 +1088,12 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
 
     http://en.wikipedia.org/wiki/List_of_airports_by_ICAO_code
 
-    http://www.aircharterguide.com/Airports 
-                 		     
+    http://www.aircharterguide.com/Airports
+
+  For example, EDDT is the station code for the Berlin Tegel
+  "Otto Lilienthal" Aiport, and KJFK is the station code for
+  John F. Kennedy International Airport.
+
   Since this module uses the NWS METAR Observations, you can get
   weather reports from anywhere in the world that has a four-letter
   station code.
@@ -1139,7 +1149,7 @@ Geo::WeatherNWS - A simple way to get current weather data from the NWS.
   $Report->{code}               # The Station Code
 
   These values might also be available.
-  (The values {day} and {time} above should always be available.)  
+  (The values {day} and {time} above should always be available.)
   $Report->{report_date}        # Report Date
   $Report->{report_time}        # Report Time
 
@@ -1267,7 +1277,7 @@ Decodeobs takes the obs in a string format and decodes them.
 
 =item convert_c_to_f ( $celsius )
 
-Convert a temperature in Celsius to Fahrenheit. 
+Convert a temperature in Celsius to Fahrenheit.
 
 =item convert_f_to_c ( $fahrenheit )
 
