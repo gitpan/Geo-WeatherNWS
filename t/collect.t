@@ -2,12 +2,14 @@
 
 use strict;
 use warnings;
-use Test::More tests => 4;
+use Test::More;
 use Geo::WeatherNWS;
 
-
-SKIP: {
-    skip "network dependent test", 4 unless $ENV{TEST_NETWORK};
+if ( ! $ENV{TEST_NETWORK} ) {
+    plan skip_all => "ENV{TEST_NETWORK} is not set";
+}
+else {
+    plan tests => 4;
 
     my $report_a = Geo::WeatherNWS::new();
     # Test connecting to bad server via FTP

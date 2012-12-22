@@ -12,6 +12,7 @@ Requirements:
 	POSIX
 	Carp
 	LWP::UserAgent (only if http is used)
+    Test::More
 
 Install this module in the normal way:
 

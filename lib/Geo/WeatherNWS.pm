@@ -30,7 +30,7 @@ package Geo::WeatherNWS;
 #                 20 December 2012 - Handle undefined dewpoint
 #                                    Minor performance improvement
 #                                    Add test for getreporthttp
-#
+#                 22 December 2012 - Clean up and avoid division by zero
 #
 #------------------------------------------------------------------------------
 
@@ -49,7 +49,7 @@ use Carp ();
 # Version
 #------------------------------------------------------------------------------
 
-our $VERSION = '1.052';
+our $VERSION = '1.053';
 
 #------------------------------------------------------------------------------
 # Round function
@@ -60,7 +60,7 @@ sub round {
     my $float = shift;
     my $rounded;
 
-    if ( defined $float ) {
+    if ( defined $float && $float ne "" ) {
         $rounded = sprintf "%.0f", $float;
     }
     return $rounded;
@@ -76,7 +76,7 @@ sub convert_f_to_c {
     my $fahrenheit = shift;
     my $celsius;
 
-    if (defined $fahrenheit) {
+    if ( defined $fahrenheit && $fahrenheit ne "" ) {
         $celsius = (5.0/9.0) * ($fahrenheit - 32.0);
     }
     return $celsius;
@@ -86,7 +86,7 @@ sub convert_c_to_f {
     my $celsius = shift;
     my $fahrenheit;
 
-    if (defined $celsius)  {
+    if ( defined $celsius && $celsius ne "" )  {
         $fahrenheit = ((9.0/5.0) * $celsius) + 32.0;
     }
     return $fahrenheit;
@@ -108,7 +108,7 @@ sub windchill {
     # Bright sunshine may increase the wind chill temperature by
     # 10 to 18 degress F.
 
-    if (defined $F && defined $wind_speed_mph) {
+    if ( defined $F && $F ne "" && defined $wind_speed_mph && $wind_speed_mph ne "" ) {
         # Old Formula
         # my $Windc=int(
         #    0.0817*
@@ -136,7 +136,7 @@ sub heat_index {
     my $rh = shift;
     my $heat_index;
 
-    if (defined $F && defined $rh) {
+    if ( defined $F && $F ne "" && defined $rh && $rh ne "" ) {
         $heat_index =
             -42.379 +
             2.04901523 * $F +
@@ -159,7 +159,7 @@ sub convert_kts_to_mph {
     my $knots = shift;
     my $mph;
 
-    if (defined $knots) {
+    if ( defined $knots && $knots ne "" ) {
         $mph = $knots * 1.150779;
     }
     return $mph;
@@ -173,7 +173,7 @@ sub convert_kts_to_kmh {
     my $knots = shift;
     my $kmh;
 
-    if (defined $knots) {
+    if ( defined $knots && $knots ne "" ) {
         $kmh = $knots * 1.852;
     }
     return $kmh;
@@ -187,7 +187,7 @@ sub convert_miles_to_km {
     my $miles = shift;
     my $km;
 
-    if (defined $miles) {
+    if ( defined $miles && $miles ne "" ) {
         $km = $miles * 1.609344;
     }
     return $km;
@@ -635,10 +635,10 @@ sub decode {
             my $Windgustkts = 0;
 
             if ( $Windspeedkts =~ /G/ ) {
-                my @Splitter = split( /G/, $Windspeedkts );
-
-                $Windspeedkts = $Splitter[0];
-                $Windgustkts  = $Splitter[1];
+                ($Windspeedkts, $Windgustkts) = split( /G/, $Windspeedkts );
+                if ( ! defined $Windgustkts || $Windgustkts eq "" ) {
+                    $Windgustkts = 0;
+                }
             }
 
             $Windspeedkts =~ tr/[A-Z]//d;
@@ -670,6 +670,7 @@ sub decode {
  #------------------------------------------------------------------------------
 
         elsif ( $Line =~ /([0-9]SM)$/ ) {
+            $DB::single = 1;
             $Line =~ tr/[A-Z]//d;
 
  #------------------------------------------------------------------------------
@@ -677,8 +678,18 @@ sub decode {
  #------------------------------------------------------------------------------
 
             if ( $Line =~ /\// ) {
-                my @Splitter = split( /\//, $Line );
-                $Line = $Splitter[0] / $Splitter[1];
+                my ($Numerator,$Denominator) = split( /\//, $Line );
+                if ( defined $Denominator && $Denominator ne "" ) {
+                    if ( $Denominator != 0 ) {
+                        $Line = $Numerator / $Denominator;
+                    }
+                    else {
+                        $Line = undef;
+                    }
+                }
+                else {
+                    $Line = $Numerator;
+                }
             }
 
             my $Viskm = convert_miles_to_km( $Line );
@@ -751,9 +762,10 @@ sub decode {
             || ( $Line =~ /^(M[0-9][0-9]\/M[0-9][0-9])/ )
             || ( $Line =~ /^([0-9][0-9]\/M[0-9][0-9])/ ) )
         {
-            my @Splitter    = split( /\//, $Line );
-            my $Temperature = $Splitter[0];
-            my $Dewpoint    = $Splitter[1];
+            my ($Temperature, $Dewpoint) = split( /\//, $Line );
+            if ( $Dewpoint eq "" ) {
+                $Dewpoint = undef;
+            }
 
             if ( $Temperature =~ /M/ ) {
                 $Temperature =~ tr/[A-Z]//d;
@@ -772,9 +784,11 @@ sub decode {
               6.11 * 10.0**( 7.5 * $Temperature / ( 237.7 + $Temperature ) );
             my $E;
             my $rh;
-            if (defined $Dewpoint) {
+            if ( defined $Dewpoint ) {
                 $E = 6.11 * 10.0**( 7.5 * $Dewpoint / ( 237.7 + $Dewpoint ) );
-                $rh = round( ( $E / $Es ) * 100 );
+                if ($Es != 0) {
+                    $rh = round( ( $E / $Es ) * 100 );
+                }
             }
 
             my $F = $Tempf;

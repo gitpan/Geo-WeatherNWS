@@ -2,7 +2,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 102;
+use Test::More tests => 103;
 use Geo::WeatherNWS;
 
 sub num_close {
@@ -178,4 +178,15 @@ my $decode5 = $report5->decodeobs($obs5);
 is( $decode5->{dewpoint_c}, undef, 'decoded undef dewpoint Celius' );
 is( $decode5->{dewpoint_f}, undef, 'decoded undef dewpoint Fahrenheit' );
 is( $decode5->{relative_humidity}, undef, 'decoded undef rh');
+
+#------------------------------------------------------------
+# Check handling of FEW
+#------------------------------------------------------------
+my $report6 = Geo::WeatherNWS::new();
+
+my $obs6 =
+'2011/08/27 15:53 KHOU 271553Z 30007KT 10SM FEW1     10 A2993 RMK AO2 SLPNO $';
+my $decode6 = $report6->decodeobs($obs6);
+
+is( $decode6->{cloudcover}, 'Fair', 'FEW cloudcover' );
 

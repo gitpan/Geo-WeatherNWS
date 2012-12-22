@@ -32,12 +32,14 @@
       },
       "runtime" : {
          "requires" : {
+            "Carp" : "0",
             "LWP::UserAgent" : "0",
-            "Net::FTP" : "2.5",
+            "Net::FTP" : "2.50",
+            "POSIX" : "0",
             "Test::More" : "0"
          }
       }
    },
    "release_status" : "stable",
-   "version" : "1.052"
+   "version" : "1.053"
 }
